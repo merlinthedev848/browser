@@ -32,7 +32,8 @@ mkdir -p browser_data
 
 # 4. Ask for a secure password
 echo ""
-read -p "Enter a secure password for your Virtual Browser (leave blank to use 'password123'): " USER_PASSWORD
+echo "Enter a secure password for your Virtual Browser (leave blank to use 'password123'): "
+read USER_PASSWORD </dev/tty || true
 if [ -z "$USER_PASSWORD" ]; then
     USER_PASSWORD="password123"
     echo "[!] Using default password: password123"
