@@ -55,7 +55,7 @@ echo ""
 echo "[*] Starting the Virtual Browser container..."
 sudo docker run -d \
     --name vbrowser \
-    -p 3000:3000 \
+    -p 127.0.0.1:3000:3000 \
     -e PASSWORD="$USER_PASSWORD" \
     -v $(pwd)/browser_data:/usr/src/app/browser_data \
     --restart unless-stopped \
@@ -67,11 +67,10 @@ echo ""
 echo "==================================================="
 echo "  INSTALLATION COMPLETE!                           "
 echo "==================================================="
-echo "Your secure Virtual Browser is now running."
-echo ""
-echo "Access it at: http://$SERVER_IP:3000"
+echo "Access it locally at: http://127.0.0.1:3000"
 echo "Password:     $USER_PASSWORD"
 echo ""
-echo "Note: For production use, it is highly recommended to run this"
+echo "Note: The container is securely bound to localhost."
+echo "You must use a reverse proxy (like Nginx) to access it remotely."
 echo "behind a reverse proxy (like Nginx/Caddy) to enable HTTPS."
 echo "==================================================="
