@@ -13,6 +13,14 @@ const app = express();
 const port = process.env.PORT || 3000;
 const PASSWORD = process.env.PASSWORD || 'password123';
 
+// Catch unhandled errors so the server never silently dies
+process.on('uncaughtException', (err) => {
+    console.error('[FATAL] Uncaught exception:', err.message, err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[FATAL] Unhandled rejection:', reason);
+});
+
 const validTokens = new Set();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -248,9 +256,13 @@ async function startBrowser() {
 
 // Pre-start browser at server boot so first connection is instant
 startBrowser().then(async () => {
+    console.log('Pre-starting initial tab...');
     const initialTabId = await createTab();
     await switchTab(initialTabId);
-}).catch(err => console.error('Failed to pre-start browser:', err));
+    console.log('Server fully ready.');
+}).catch(err => {
+    console.error('[WARN] Pre-start failed, will retry on first connection:', err.message);
+});
 
 // --- WebSocket Connection Handler ---
 wss.on('connection', async (ws) => {
@@ -260,14 +272,20 @@ wss.on('connection', async (ws) => {
 
     // Wait for browser to be ready if it's still starting
     let waited = 0;
-    while (browserStarting && waited < 30000) {
+    while (browserStarting && waited < 60000) {
         await new Promise(r => setTimeout(r, 200));
         waited += 200;
     }
 
     if (!context) {
-        // Fallback: start browser if pre-start somehow failed
-        await startBrowser().catch(err => console.error('startBrowser failed:', err));
+        console.log('Browser not ready, starting now...');
+        try {
+            await startBrowser();
+        } catch(err) {
+            console.error('[ERROR] startBrowser failed on connection:', err.message);
+            ws.close(1011, 'Browser failed to start');
+            return;
+        }
     }
 
     if (tabs.size === 0) {
