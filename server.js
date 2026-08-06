@@ -309,6 +309,6 @@ wss.on('connection', async (ws) => {
     });
 });
 
-server.listen(port, () => {
-    console.log(`Secure Virtual Browser running at http://localhost:${port}`);
+server.listen(port, '0.0.0.0', () => {
+    console.log(`Secure Virtual Browser running and listening on 0.0.0.0:${port}`);
 });
