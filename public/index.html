@@ -3,12 +3,35 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Virtual Browser</title>
+    <title>Secure Virtual Browser</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="app-container">
+    <!-- Login Screen -->
+    <div id="login-screen" class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="shield-icon"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                <h2>Secure Session</h2>
+                <p>Enter your password to access the remote browser.</p>
+            </div>
+            <form id="login-form">
+                <div class="input-group">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                    <input type="password" id="password-input" placeholder="Password" required autocomplete="current-password" />
+                </div>
+                <div id="login-error" class="error-msg hidden">Invalid password. Please try again.</div>
+                <button type="submit" id="login-btn">
+                    <span>Connect</span>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Main Browser UI -->
+    <div id="app-container" class="app-container hidden">
         <!-- Glassmorphism Top Bar -->
         <header class="toolbar">
             <div class="window-controls">
@@ -35,9 +58,9 @@
         <main class="browser-viewport">
             <div class="loading-overlay" id="loading-overlay">
                 <div class="spinner"></div>
-                <p>Connecting to Remote Session...</p>
+                <p>Initializing Stream...</p>
             </div>
-            <canvas id="screencast"></canvas>
+            <canvas id="screencast" tabindex="0"></canvas>
         </main>
     </div>
 
