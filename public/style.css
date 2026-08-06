@@ -345,6 +345,18 @@ body {
     font-weight: 500;
 }
 
+.tab.active .tab-icon {
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    object-fit: cover;
+}
+
+.tab-title {
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
 .tab-close {
     width: 16px;
     height: 16px;

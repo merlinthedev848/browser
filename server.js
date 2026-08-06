@@ -68,6 +68,7 @@ function broadcastTabState() {
         id,
         title: t.title,
         url: t.url,
+        favicon: t.favicon,
         isActive: id === activeTabId
     }));
     broadcast({ type: 'tab_state', tabs: tabList });
@@ -84,7 +85,7 @@ async function createTab(targetUrl = 'https://www.google.com') {
     const client = await page.context().newCDPSession(page);
     await client.send('Page.enable');
 
-    tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl });
+    tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl, favicon: '' });
     
     // Page events
     page.on('framenavigated', async (frame) => {
@@ -92,7 +93,16 @@ async function createTab(targetUrl = 'https://www.google.com') {
             const t = tabs.get(tabId);
             if (t) {
                 t.url = frame.url();
-                t.title = await page.title().catch(() => 'Loading...');
+                try {
+                    t.title = await page.title();
+                    t.favicon = await page.evaluate(() => {
+                        const icon = document.querySelector("link[rel~='icon']");
+                        return icon ? icon.href : new URL(window.location.href).origin + '/favicon.ico';
+                    });
+                } catch(e) {
+                    t.title = 'Loading...';
+                }
+                
                 broadcastTabState();
                 if (tabId === activeTabId) {
                     broadcast({ type: 'url_changed', url: t.url });
@@ -182,6 +192,23 @@ async function startBrowser() {
         ]
     });
     
+    // Cursor Sync Binding
+    await context.exposeBinding('reportCursor', (source, cursor) => {
+        if (source.page.isClosed()) return;
+        // Only broadcast if this page is the active tab
+        const tab = Array.from(tabs.values()).find(t => t.page === source.page);
+        if (tab && activeTabId && tabs.get(activeTabId) === tab) {
+            broadcast({ type: 'cursor', cursor });
+        }
+    });
+
+    await context.addInitScript(() => {
+        document.addEventListener('mouseover', (e) => {
+            const style = window.getComputedStyle(e.target).cursor;
+            window.reportCursor(style);
+        }, true);
+    });
+
     // Close any default blank pages launched by persistent context
     const pages = context.pages();
     for (const p of pages) {

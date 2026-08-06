@@ -19,6 +19,14 @@ const newTabBtn = document.getElementById('new-tab-btn');
 
 let ws = null;
 
+// --- Session Persistence ---
+const storedToken = sessionStorage.getItem('vb_token');
+if (storedToken) {
+    loginScreen.classList.add('hidden');
+    appContainer.classList.remove('hidden');
+    initApp(storedToken);
+}
+
 // --- Authentication Flow ---
 loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -37,6 +45,7 @@ loginForm.addEventListener('submit', async (e) => {
         const data = await response.json();
         
         if (data.success) {
+            sessionStorage.setItem('vb_token', data.token);
             loginScreen.classList.add('hidden');
             appContainer.classList.remove('hidden');
             initApp(data.token);
@@ -79,6 +88,7 @@ function initApp(token) {
         statusText.textContent = 'Disconnected';
         loadingOverlay.classList.remove('hidden');
         canvas.classList.remove('ready');
+        // If connection closes gracefully or token expires, we might want to clear it, but let's leave it for now.
     };
 
     ws.onmessage = (event) => {
@@ -99,6 +109,9 @@ function initApp(token) {
                 urlInput.value = msg.url;
             } else if (msg.type === 'tab_state') {
                 renderTabs(msg.tabs);
+            } else if (msg.type === 'cursor') {
+                // Sync cursor style
+                canvas.style.cursor = msg.cursor || 'default';
             }
         } catch (e) {
             console.error("Error processing message:", e);
@@ -111,6 +124,15 @@ function initApp(token) {
         tabs.forEach(tab => {
             const tabEl = document.createElement('div');
             tabEl.className = `tab ${tab.isActive ? 'active' : ''}`;
+            
+            if (tab.favicon) {
+                const iconEl = document.createElement('img');
+                iconEl.className = 'tab-icon';
+                iconEl.src = tab.favicon;
+                // Fallback icon if image fails to load
+                iconEl.onerror = () => { iconEl.style.display = 'none'; };
+                tabEl.appendChild(iconEl);
+            }
             
             const titleEl = document.createElement('span');
             titleEl.className = 'tab-title';
@@ -156,7 +178,6 @@ function initApp(token) {
 
     function getMappedCoords(e) {
         const rect = canvas.getBoundingClientRect();
-        // Assume default Playwright viewport 1280x720
         const scaleX = 1280 / rect.width;
         const scaleY = 720 / rect.height;
         return {
@@ -238,11 +259,24 @@ function initApp(token) {
         }
     });
 
-    // URL Navigation
+    // Smart URL Navigation
     function navigate() {
-        const url = urlInput.value.trim();
-        if (url) {
-            sendMsg({ type: 'goto', url });
+        const input = urlInput.value.trim();
+        if (input) {
+            // Regex to check if it looks like a URL or domain
+            const isUrl = /^(https?:\/\/)?([\w.-]+)\.([a-z]{2,})(:\d{1,5})?(\/.*)?$/i.test(input) || input.startsWith('localhost:');
+            
+            let finalUrl = input;
+            if (isUrl) {
+                if (!input.startsWith('http://') && !input.startsWith('https://')) {
+                    finalUrl = 'https://' + input;
+                }
+            } else {
+                // If not a URL, perform a Google search
+                finalUrl = 'https://www.google.com/search?q=' + encodeURIComponent(input);
+            }
+            
+            sendMsg({ type: 'goto', url: finalUrl });
             canvas.focus();
         }
     }
