@@ -58,10 +58,6 @@ function broadcast(msgObj) {
     const msg = JSON.stringify(msgObj);
     wss.clients.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) {
-            // Drop video frames if the client's network buffer is congested (> 1MB)
-            if (msgObj.type === 'frame' && ws.bufferedAmount > 1024 * 1024) {
-                return; 
-            }
             ws.send(msg);
         }
     });
@@ -119,7 +115,17 @@ async function createTab(targetUrl = 'https://www.google.com') {
         if (tabId !== activeTabId) return; // Ignore frames from inactive tabs
         const { data, sessionId } = frame;
         client.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
-        broadcast({ type: 'frame', data });
+        
+        wss.clients.forEach(ws => {
+            if (ws.readyState === WebSocket.OPEN) {
+                if (!ws.frameInFlight) {
+                    ws.frameInFlight = true;
+                    ws.send(JSON.stringify({ type: 'frame', data }));
+                } else {
+                    ws.lastFrameData = data; // Keep the latest frame waiting
+                }
+            }
+        });
     });
 
     // Do not await goto, otherwise it blocks switchTab and startScreencast
@@ -225,6 +231,8 @@ async function startBrowser() {
 
 wss.on('connection', async (ws) => {
     console.log('Client connected securely');
+    ws.frameInFlight = false;
+    ws.lastFrameData = null;
     
     if (!context) {
         await startBrowser();
@@ -247,6 +255,16 @@ wss.on('connection', async (ws) => {
         try {
             const msg = JSON.parse(message);
             
+            if (msg.type === 'frame_ack') {
+                ws.frameInFlight = false;
+                if (ws.lastFrameData) {
+                    ws.frameInFlight = true;
+                    ws.send(JSON.stringify({ type: 'frame', data: ws.lastFrameData }));
+                    ws.lastFrameData = null;
+                }
+                return;
+            }
+
             // Tab Management Commands
             if (msg.type === 'new_tab') {
                 const newTabId = await createTab(msg.url || 'https://www.google.com');

@@ -103,6 +103,10 @@ function initApp(token) {
                     }
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    sendMsg({ type: 'frame_ack' });
+                };
+                img.onerror = () => {
+                    sendMsg({ type: 'frame_ack' });
                 };
                 img.src = 'data:image/jpeg;base64,' + msg.data;
             } else if (msg.type === 'url_changed') {
