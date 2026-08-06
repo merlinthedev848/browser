@@ -45,15 +45,17 @@ server.on('upgrade', (request, socket, head) => {
     });
 });
 
-// Browser State
+// --- Browser State ---
 let context = null;
 let adblocker = null;
 let activeTabId = null;
 let tabCounter = 0;
+let browserStarting = false; // Guard against concurrent startBrowser calls
 
-// Map of tabId -> { page, client, title, url }
-const tabs = new Map(); 
+// Map of tabId -> { page, client, title, url, favicon }
+const tabs = new Map();
 
+// --- Broadcast helpers ---
 function broadcast(msgObj) {
     const msg = JSON.stringify(msgObj);
     wss.clients.forEach(ws => {
@@ -74,10 +76,22 @@ function broadcastTabState() {
     broadcast({ type: 'tab_state', tabs: tabList });
 }
 
+// --- Send a frame to a specific client, respecting flow control ---
+function sendFrameToClient(ws, data) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    if (!ws.frameInFlight) {
+        ws.frameInFlight = true;
+        ws.send(JSON.stringify({ type: 'frame', data }));
+    } else {
+        ws.lastFrameData = data; // Keep only the latest pending frame
+    }
+}
+
+// --- Tab Management ---
 async function createTab(targetUrl = 'https://www.google.com') {
     const tabId = 'tab_' + (++tabCounter);
     const page = await context.newPage();
-    
+
     if (adblocker) {
         await adblocker.enableBlockingInPage(page);
     }
@@ -86,88 +100,84 @@ async function createTab(targetUrl = 'https://www.google.com') {
     await client.send('Page.enable');
 
     tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl, favicon: '' });
-    
-    // Page events
-    page.on('framenavigated', async (frame) => {
-        if (frame === page.mainFrame()) {
-            const t = tabs.get(tabId);
-            if (t) {
-                t.url = frame.url();
-                try {
-                    t.title = await page.title();
-                    t.favicon = await page.evaluate(() => {
-                        const icon = document.querySelector("link[rel~='icon']");
-                        return icon ? icon.href : new URL(window.location.href).origin + '/favicon.ico';
-                    });
-                } catch(e) {
-                    t.title = 'Loading...';
-                }
-                
-                broadcastTabState();
-                if (tabId === activeTabId) {
-                    broadcast({ type: 'url_changed', url: t.url });
-                }
-            }
-        }
-    });
 
-    client.on('Page.screencastFrame', (frame) => {
-        if (tabId !== activeTabId) return; // Ignore frames from inactive tabs
-        const { data, sessionId } = frame;
-        client.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
-        
-        wss.clients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                if (!ws.frameInFlight) {
-                    ws.frameInFlight = true;
-                    ws.send(JSON.stringify({ type: 'frame', data }));
-                } else {
-                    ws.lastFrameData = data; // Keep the latest frame waiting
-                }
+    // Update tab state on navigation
+    page.on('framenavigated', async (frame) => {
+        if (frame !== page.mainFrame()) return;
+        const t = tabs.get(tabId);
+        if (!t || page.isClosed()) return;
+
+        t.url = frame.url();
+
+        // Fetch title and favicon non-blocking
+        page.title().then(title => { t.title = title || 'New Tab'; }).catch(() => {});
+        page.evaluate(() => {
+            const icon = document.querySelector("link[rel~='icon'], link[rel='shortcut icon']");
+            return icon ? icon.href : (window.location.origin + '/favicon.ico');
+        }).then(fav => { t.favicon = fav || ''; }).catch(() => {}).finally(() => {
+            broadcastTabState();
+            if (tabId === activeTabId) {
+                broadcast({ type: 'url_changed', url: t.url });
             }
         });
     });
 
-    // Do not await goto, otherwise it blocks switchTab and startScreencast
-    page.goto(targetUrl).catch(e => console.log('Navigation error:', e.message));
+    // Stream frames to connected clients
+    client.on('Page.screencastFrame', (frame) => {
+        if (tabId !== activeTabId) return;
+        const { data, sessionId } = frame;
+        client.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
+
+        wss.clients.forEach(ws => {
+            if (ws.readyState === WebSocket.OPEN) {
+                sendFrameToClient(ws, data);
+            }
+        });
+    });
+
+    // Navigate without blocking — we'll stream frames as they come
+    page.goto(targetUrl).catch(e => console.log(`[Tab ${tabId}] Navigation error: ${e.message}`));
     return tabId;
 }
 
 async function switchTab(tabId) {
     if (!tabs.has(tabId)) return;
-    
-    // Stop screencast on old tab
-    if (activeTabId && tabs.has(activeTabId)) {
+
+    // Stop screencast on previous active tab
+    if (activeTabId && tabs.has(activeTabId) && activeTabId !== tabId) {
         tabs.get(activeTabId).client.send('Page.stopScreencast').catch(() => {});
     }
 
     activeTabId = tabId;
     const t = tabs.get(tabId);
-    
+
     broadcastTabState();
     broadcast({ type: 'url_changed', url: t.url });
 
-    // Start screencast on new tab
-            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 50, everyNthFrame: 1 }).catch(() => {});
+    // Reset frame flow control for all clients on tab switch
+    wss.clients.forEach(ws => {
+        ws.frameInFlight = false;
+        ws.lastFrameData = null;
+    });
+
+    await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 60, everyNthFrame: 1 }).catch(() => {});
 }
 
 async function closeTab(tabId) {
     if (!tabs.has(tabId)) return;
     const t = tabs.get(tabId);
+    t.client.send('Page.stopScreencast').catch(() => {});
     await t.page.close().catch(() => {});
     tabs.delete(tabId);
-    
+
     if (activeTabId === tabId) {
         if (tabs.size > 0) {
-            // switch to the last available tab
             const lastTabId = Array.from(tabs.keys()).pop();
             await switchTab(lastTabId);
         } else {
             activeTabId = null;
             broadcastTabState();
-            // Optionally close the browser or open a new blank tab
-            await createTab();
-            const newTabId = Array.from(tabs.keys()).pop();
+            const newTabId = await createTab();
             await switchTab(newTabId);
         }
     } else {
@@ -175,16 +185,19 @@ async function closeTab(tabId) {
     }
 }
 
+// --- Browser Lifecycle ---
 async function startBrowser() {
+    if (context || browserStarting) return;
+    browserStarting = true;
+
     const userDataDir = path.join(__dirname, 'browser_data');
     if (!fs.existsSync(userDataDir)) {
-        fs.mkdirSync(userDataDir);
+        fs.mkdirSync(userDataDir, { recursive: true });
     }
 
-    // Initialize Adblocker
     console.log('Initializing Adblocker Engine...');
     adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch).catch(e => {
-        console.error('Failed to load adblocker lists', e);
+        console.error('Failed to load adblocker lists:', e.message);
         return null;
     });
 
@@ -202,11 +215,10 @@ async function startBrowser() {
             '--window-size=1280,720'
         ]
     });
-    
-    // Cursor Sync Binding
+
+    // Cursor sync: listen to computed cursor style changes in pages
     await context.exposeBinding('reportCursor', (source, cursor) => {
         if (source.page.isClosed()) return;
-        // Only broadcast if this page is the active tab
         const tab = Array.from(tabs.values()).find(t => t.page === source.page);
         if (tab && activeTabId && tabs.get(activeTabId) === tab) {
             broadcast({ type: 'cursor', cursor });
@@ -215,57 +227,76 @@ async function startBrowser() {
 
     await context.addInitScript(() => {
         document.addEventListener('mouseover', (e) => {
-            const style = window.getComputedStyle(e.target).cursor;
-            window.reportCursor(style);
+            try {
+                const style = window.getComputedStyle(e.target).cursor;
+                window.reportCursor(style);
+            } catch (_) {}
         }, true);
     });
 
-    // Close any default blank pages launched by persistent context
-    const pages = context.pages();
-    for (const p of pages) {
-        await p.close();
+    // Close any blank pages opened by persistent context on startup
+    for (const p of context.pages()) {
+        await p.close().catch(() => {});
     }
 
+    browserStarting = false;
     console.log('Browser context ready.');
 }
 
+// Pre-start browser at server boot so first connection is instant
+startBrowser().then(async () => {
+    const initialTabId = await createTab();
+    await switchTab(initialTabId);
+}).catch(err => console.error('Failed to pre-start browser:', err));
+
+// --- WebSocket Connection Handler ---
 wss.on('connection', async (ws) => {
-    console.log('Client connected securely');
+    console.log('Client connected');
     ws.frameInFlight = false;
     ws.lastFrameData = null;
-    
-    if (!context) {
-        await startBrowser();
+
+    // Wait for browser to be ready if it's still starting
+    let waited = 0;
+    while (browserStarting && waited < 30000) {
+        await new Promise(r => setTimeout(r, 200));
+        waited += 200;
     }
-    
+
+    if (!context) {
+        // Fallback: start browser if pre-start somehow failed
+        await startBrowser().catch(err => console.error('startBrowser failed:', err));
+    }
+
     if (tabs.size === 0) {
         const initialTabId = await createTab();
         await switchTab(initialTabId);
     } else {
-        // Just send current state to new client
+        // Send current state to new connecting client
         broadcastTabState();
-        if (activeTabId) {
+        if (activeTabId && tabs.has(activeTabId)) {
             const t = tabs.get(activeTabId);
             ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
-            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 50, everyNthFrame: 1 }).catch(() => {});
+            // Start screencast for this new client
+            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 60, everyNthFrame: 1 }).catch(() => {});
         }
     }
 
     ws.on('message', async (message) => {
         try {
             const msg = JSON.parse(message);
-            
+
+            // Flow control: client signals it rendered the last frame
             if (msg.type === 'frame_ack') {
                 ws.frameInFlight = false;
                 if (ws.lastFrameData) {
-                    ws.frameInFlight = true;
-                    ws.send(JSON.stringify({ type: 'frame', data: ws.lastFrameData }));
+                    const data = ws.lastFrameData;
                     ws.lastFrameData = null;
+                    sendFrameToClient(ws, data);
                 }
                 return;
             }
 
-            // Tab Management Commands
+            // Tab management
             if (msg.type === 'new_tab') {
                 const newTabId = await createTab(msg.url || 'https://www.google.com');
                 await switchTab(newTabId);
@@ -280,58 +311,76 @@ wss.on('connection', async (ws) => {
                 return;
             }
 
-            // Input commands routed to active tab
+            // Input — routed to active tab's page
             if (!activeTabId || !tabs.has(activeTabId)) return;
             const activePage = tabs.get(activeTabId).page;
+            if (activePage.isClosed()) return;
 
             switch (msg.type) {
                 case 'mousemove':
-                    await activePage.mouse.move(msg.x, msg.y);
+                    activePage.mouse.move(msg.x, msg.y).catch(() => {});
                     break;
                 case 'mousedown':
-                    await activePage.mouse.down({ button: msg.button });
+                    activePage.mouse.down({ button: msg.button || 'left' }).catch(() => {});
                     break;
                 case 'mouseup':
-                    await activePage.mouse.up({ button: msg.button });
+                    activePage.mouse.up({ button: msg.button || 'left' }).catch(() => {});
                     break;
                 case 'keydown':
-                    if (msg.modifiers) {
-                        for (const mod of msg.modifiers) await activePage.keyboard.down(mod);
+                    // Press modifiers first, then the key
+                    if (msg.modifiers && msg.modifiers.length > 0) {
+                        for (const mod of msg.modifiers) {
+                            await activePage.keyboard.down(mod).catch(() => {});
+                        }
                     }
-                    await activePage.keyboard.down(msg.key);
+                    await activePage.keyboard.down(msg.key).catch(() => {});
                     break;
                 case 'keyup':
-                    await activePage.keyboard.up(msg.key);
-                    if (msg.modifiers) {
-                        for (const mod of msg.modifiers) await activePage.keyboard.up(mod);
+                    // Release the key first, then modifiers
+                    await activePage.keyboard.up(msg.key).catch(() => {});
+                    if (msg.modifiers && msg.modifiers.length > 0) {
+                        for (const mod of msg.modifiers) {
+                            await activePage.keyboard.up(mod).catch(() => {});
+                        }
                     }
                     break;
                 case 'wheel':
-                    await activePage.mouse.wheel(msg.deltaX, msg.deltaY);
+                    activePage.mouse.wheel(msg.deltaX || 0, msg.deltaY || 0).catch(() => {});
                     break;
-                case 'goto':
-                    if (msg.url) {
-                        let finalUrl = msg.url;
-                        if (!finalUrl.startsWith('http://') && !finalUrl.startsWith('https://')) {
-                            finalUrl = 'http://' + finalUrl;
-                        }
-                        await activePage.goto(finalUrl);
+                case 'goto': {
+                    if (!msg.url) break;
+                    let finalUrl = msg.url.trim();
+                    // Normalize URL
+                    if (!/^https?:\/\//i.test(finalUrl)) {
+                        // Check if it looks like a search query or a domain
+                        const looksLikeDomain = /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/.*)?$/.test(finalUrl)
+                            || finalUrl.startsWith('localhost');
+                        finalUrl = looksLikeDomain
+                            ? 'https://' + finalUrl
+                            : 'https://www.google.com/search?q=' + encodeURIComponent(finalUrl);
                     }
+                    // Navigate without awaiting — keeps the WS message handler responsive
+                    activePage.goto(finalUrl).catch(e => console.log(`Navigation error: ${e.message}`));
                     break;
+                }
                 case 'type':
-                    await activePage.keyboard.type(msg.text);
+                    activePage.keyboard.type(msg.text).catch(() => {});
                     break;
             }
         } catch (err) {
-            console.error('Error handling WebSocket message:', err);
+            console.error('Error handling WebSocket message:', err.message);
         }
     });
 
     ws.on('close', () => {
         console.log('Client disconnected');
     });
+
+    ws.on('error', (err) => {
+        console.error('WebSocket error:', err.message);
+    });
 });
 
 server.listen(port, '0.0.0.0', () => {
-    console.log(`Secure Virtual Browser running and listening on 0.0.0.0:${port}`);
+    console.log(`Virtual Browser listening on 0.0.0.0:${port}`);
 });

@@ -1,78 +1,92 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 echo "==================================================="
 echo "  Virtual Browser - Quick Install for Debian 13    "
 echo "==================================================="
 
-# 1. Update and install dependencies
+# 1. Install system dependencies
 echo "[*] Installing required system packages (Git & Docker)..."
-sudo apt-get update -y
+sudo apt-get update -y -q
 sudo apt-get install -y git docker.io curl
 
-# Ensure Docker is running
+# Ensure Docker is enabled and running
 sudo systemctl enable --now docker
 
-# 2. Clone or Update the repository
-if [ -d "virtual-browser" ]; then
-    echo "[*] Existing installation found! Updating repository..."
-    cd virtual-browser
-    # Discard any local changes and pull the latest code
-    git reset --hard
-    git pull origin main
+# 2. Clone or update the repository
+REPO_URL="https://github.com/merlinthedev848/browser.git"
+INSTALL_DIR="virtual-browser"
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+    echo "[*] Existing installation found — updating to latest version..."
+    cd "$INSTALL_DIR"
+    git fetch origin main
+    git reset --hard origin/main
 else
     echo "[*] Cloning the Virtual Browser repository..."
-    git clone https://github.com/merlinthedev848/browser.git virtual-browser
-    cd virtual-browser
+    git clone "$REPO_URL" "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
 fi
 
-# 3. Create persistent data directory
+# 3. Ensure persistent data directory exists
 echo "[*] Setting up persistent storage..."
 mkdir -p browser_data
 
-# 4. Ask for a secure password
+# 4. Ask for password
 echo ""
-echo "Enter a secure password for your Virtual Browser (leave blank to use 'password123'): "
-read USER_PASSWORD </dev/tty || true
+echo "Enter a secure password for your Virtual Browser"
+echo "(Leave blank to use the default: 'password123'):"
+read -r USER_PASSWORD </dev/tty || true
 if [ -z "$USER_PASSWORD" ]; then
     USER_PASSWORD="password123"
     echo "[!] Using default password: password123"
 fi
 
-# 5. Build the Docker Image
+# 5. Build Docker image
 echo ""
-echo "[*] Building the Docker image (this may take a few minutes to download Playwright dependencies)..."
+echo "[*] Building Docker image (this may take a few minutes on first run)..."
 sudo docker build -t virtual-browser .
 
-# 6. Stop and remove existing container if it exists
+# 6. Stop and remove any existing container
 if sudo docker ps -a --format '{{.Names}}' | grep -q "^vbrowser$"; then
-    echo "[*] Removing existing 'vbrowser' container..."
+    echo "[*] Removing existing container..."
     sudo docker rm -f vbrowser
 fi
 
-# 7. Run the container
+# 7. Start the container
 echo ""
 echo "[*] Starting the Virtual Browser container..."
 sudo docker run -d \
     --name vbrowser \
     -p 3000:3000 \
     -e PASSWORD="$USER_PASSWORD" \
-    -v $(pwd)/browser_data:/usr/src/app/browser_data \
+    -v "$(pwd)/browser_data:/usr/src/app/browser_data" \
     --restart unless-stopped \
     virtual-browser
 
-# 8. Finish
-SERVER_IP=$(curl -s ifconfig.me || echo "<YOUR_SERVER_IP>")
-echo ""
-echo "==================================================="
-echo "  INSTALLATION COMPLETE!                           "
-echo "==================================================="
-echo "Your secure Virtual Browser is now running."
-echo ""
-echo "Access it via your server's IP or Domain on port 3000"
-echo "Password:     $USER_PASSWORD"
-echo ""
-echo "Note: If Nginx is running on a different machine/container,"
-echo "ensure it is configured to point to this container's local IP."
-echo "behind a reverse proxy (like Nginx/Caddy) to enable HTTPS."
-echo "==================================================="
+# 8. Wait briefly and confirm the container started
+sleep 2
+if sudo docker ps --format '{{.Names}}' | grep -q "^vbrowser$"; then
+    echo ""
+    echo "==================================================="
+    echo "  INSTALLATION COMPLETE!                           "
+    echo "==================================================="
+    echo ""
+    echo "  Container: vbrowser (running)"
+    echo "  Port:      3000"
+    echo "  Password:  $USER_PASSWORD"
+    echo ""
+    echo "  If using a reverse proxy (e.g. Nginx), point it"
+    echo "  to http://<this-container-ip>:3000"
+    echo ""
+    echo "  WebSocket upgrade headers are required:"
+    echo "    proxy_http_version 1.1;"
+    echo "    proxy_set_header Upgrade \$http_upgrade;"
+    echo "    proxy_set_header Connection \"upgrade\";"
+    echo "==================================================="
+else
+    echo ""
+    echo "[!] Container failed to start. Check logs with:"
+    echo "    docker logs vbrowser"
+    exit 1
+fi
