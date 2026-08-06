@@ -118,7 +118,8 @@ async function createTab(targetUrl = 'https://www.google.com') {
         broadcast({ type: 'frame', data });
     });
 
-    await page.goto(targetUrl);
+    // Do not await goto, otherwise it blocks switchTab and startScreencast
+    page.goto(targetUrl).catch(e => console.log('Navigation error:', e.message));
     return tabId;
 }
 
