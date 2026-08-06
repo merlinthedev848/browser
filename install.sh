@@ -13,13 +13,15 @@ sudo apt-get install -y git docker.io curl
 # Ensure Docker is running
 sudo systemctl enable --now docker
 
-# 2. Clone the repository if not already in it
-if [ ! -f "Dockerfile" ] || [ ! -f "server.js" ]; then
+# 2. Clone or Update the repository
+if [ -d "virtual-browser" ]; then
+    echo "[*] Existing installation found! Updating repository..."
+    cd virtual-browser
+    # Discard any local changes and pull the latest code
+    git reset --hard
+    git pull origin main
+else
     echo "[*] Cloning the Virtual Browser repository..."
-    if [ -d "virtual-browser" ]; then
-        echo "[!] Directory 'virtual-browser' already exists. Removing it..."
-        rm -rf virtual-browser
-    fi
     git clone https://github.com/merlinthedev848/browser.git virtual-browser
     cd virtual-browser
 fi
