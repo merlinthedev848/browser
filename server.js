@@ -58,6 +58,10 @@ function broadcast(msgObj) {
     const msg = JSON.stringify(msgObj);
     wss.clients.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) {
+            // Drop video frames if the client's network buffer is congested (> 1MB)
+            if (msgObj.type === 'frame' && ws.bufferedAmount > 1024 * 1024) {
+                return; 
+            }
             ws.send(msg);
         }
     });
@@ -138,7 +142,7 @@ async function switchTab(tabId) {
     broadcast({ type: 'url_changed', url: t.url });
 
     // Start screencast on new tab
-    await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }).catch(() => {});
+            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 50, everyNthFrame: 1 }).catch(() => {});
 }
 
 async function closeTab(tabId) {
@@ -235,7 +239,7 @@ wss.on('connection', async (ws) => {
         if (activeTabId) {
             const t = tabs.get(activeTabId);
             ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
-            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }).catch(() => {});
+            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 50, everyNthFrame: 1 }).catch(() => {});
         }
     }
 
