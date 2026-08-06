@@ -61,6 +61,7 @@ sudo docker run -d \
     -p 3000:3000 \
     -e PASSWORD="$USER_PASSWORD" \
     -v "$(pwd)/browser_data:/usr/src/app/browser_data" \
+    --shm-size 256m \
     --restart unless-stopped \
     virtual-browser
 

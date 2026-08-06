@@ -123,22 +123,20 @@ function initApp(token) {
             const msg = JSON.parse(event.data);
 
             if (msg.type === 'frame') {
-                const img = new Image();
-                img.onload = () => {
+                // Use createImageBitmap for hardware-accelerated decode (much faster than new Image)
+                const blob = new Blob([Uint8Array.from(atob(msg.data), c => c.charCodeAt(0))], { type: 'image/jpeg' });
+                createImageBitmap(blob).then(bitmap => {
                     if (!canvas.classList.contains('ready')) {
                         hideOverlay();
                         canvas.classList.add('ready');
                     }
                     ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                    // Acknowledge frame immediately after rendering
+                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                    bitmap.close();
                     sendMsg({ type: 'frame_ack' });
-                };
-                img.onerror = () => {
-                    // Acknowledge even on error to keep the stream flowing
+                }).catch(() => {
                     sendMsg({ type: 'frame_ack' });
-                };
-                img.src = 'data:image/jpeg;base64,' + msg.data;
+                });
 
             } else if (msg.type === 'url_changed') {
                 // Only update if user isn't currently typing in the bar
@@ -238,8 +236,12 @@ function initApp(token) {
         }
     };
 
-    // --- Mouse Input ---
+    // --- Mouse Input (throttled to 30 events/sec to avoid flooding WebSocket) ---
+    let lastMouseMove = 0;
     canvas.addEventListener('mousemove', (e) => {
+        const now = Date.now();
+        if (now - lastMouseMove < 33) return; // ~30fps
+        lastMouseMove = now;
         const c = getMappedCoords(e);
         sendMsg({ type: 'mousemove', x: c.x, y: c.y });
     });

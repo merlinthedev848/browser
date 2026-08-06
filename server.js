@@ -195,8 +195,11 @@ async function startBrowser() {
         fs.mkdirSync(userDataDir, { recursive: true });
     }
 
+    // Cache adblocker lists to disk so restarts are instant
     console.log('Initializing Adblocker Engine...');
-    adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch).catch(e => {
+    const cacheDir = path.join(userDataDir, '.adblocker_cache');
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+    adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch, { path: cacheDir }).catch(e => {
         console.error('Failed to load adblocker lists:', e.message);
         return null;
     });
