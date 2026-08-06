@@ -14,6 +14,8 @@ const goBtn = document.getElementById('go-btn');
 const statusDot = document.querySelector('.status-dot');
 const statusText = document.querySelector('.status-text');
 const loadingOverlay = document.getElementById('loading-overlay');
+const tabsContainer = document.getElementById('tabs-container');
+const newTabBtn = document.getElementById('new-tab-btn');
 
 let ws = null;
 
@@ -35,11 +37,8 @@ loginForm.addEventListener('submit', async (e) => {
         const data = await response.json();
         
         if (data.success) {
-            // Hide login, show app
             loginScreen.classList.add('hidden');
             appContainer.classList.remove('hidden');
-            
-            // Connect WebSocket with token
             initApp(data.token);
         } else {
             loginError.textContent = data.error || 'Login failed';
@@ -71,7 +70,6 @@ function initApp(token) {
         statusDot.classList.add('connected');
         statusDot.classList.remove('disconnected');
         statusText.textContent = 'Secure Session';
-        // Focus canvas to catch key events immediately
         canvas.focus();
     };
 
@@ -97,11 +95,57 @@ function initApp(token) {
                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                 };
                 img.src = 'data:image/jpeg;base64,' + msg.data;
+            } else if (msg.type === 'url_changed') {
+                urlInput.value = msg.url;
+            } else if (msg.type === 'tab_state') {
+                renderTabs(msg.tabs);
             }
         } catch (e) {
             console.error("Error processing message:", e);
         }
     };
+
+    // --- Tab Rendering ---
+    function renderTabs(tabs) {
+        tabsContainer.innerHTML = '';
+        tabs.forEach(tab => {
+            const tabEl = document.createElement('div');
+            tabEl.className = `tab ${tab.isActive ? 'active' : ''}`;
+            
+            const titleEl = document.createElement('span');
+            titleEl.className = 'tab-title';
+            titleEl.textContent = tab.title || 'New Tab';
+            
+            const closeBtn = document.createElement('div');
+            closeBtn.className = 'tab-close';
+            closeBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+            
+            tabEl.appendChild(titleEl);
+            tabEl.appendChild(closeBtn);
+            
+            // Event Listeners
+            tabEl.addEventListener('click', () => {
+                if (!tab.isActive) {
+                    loadingOverlay.querySelector('p').textContent = 'Switching tabs...';
+                    loadingOverlay.classList.remove('hidden');
+                    canvas.classList.remove('ready');
+                    sendMsg({ type: 'switch_tab', tabId: tab.id });
+                }
+            });
+            
+            closeBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                sendMsg({ type: 'close_tab', tabId: tab.id });
+            });
+            
+            tabsContainer.appendChild(tabEl);
+        });
+    }
+
+    newTabBtn.addEventListener('click', () => {
+        sendMsg({ type: 'new_tab' });
+    });
+
 
     // --- Input Passthrough ---
     function sendMsg(msg) {
@@ -136,7 +180,7 @@ function initApp(token) {
     });
 
     canvas.addEventListener('mousedown', (e) => {
-        canvas.focus(); // Ensure canvas has focus for keyboard events
+        canvas.focus();
         sendMsg({ type: 'mousedown', button: mapButton(e) });
     });
 
@@ -152,8 +196,6 @@ function initApp(token) {
     canvas.addEventListener('contextmenu', e => e.preventDefault());
 
     // --- Advanced Keyboard Passthrough ---
-    
-    // Helper to get active modifiers
     function getModifiers(e) {
         const mods = [];
         if (e.shiftKey) mods.push('Shift');
@@ -163,23 +205,16 @@ function initApp(token) {
         return mods;
     }
 
-    // List of keys to aggressively prevent default browser actions
-    // so they are sent to the remote browser.
     const preventDefaultKeys = ['Tab', 'Backspace', 'Escape', 'Enter', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 
     window.addEventListener('keydown', (e) => {
         if (document.activeElement === urlInput || document.activeElement === passwordInput) return;
         
-        // Prevent default browser shortcuts (Ctrl+T, Ctrl+R, etc) if canvas has focus
         if (document.activeElement === canvas) {
             if (e.ctrlKey || e.metaKey || e.altKey || preventDefaultKeys.includes(e.key)) {
                 e.preventDefault();
             }
-            sendMsg({ 
-                type: 'keydown', 
-                key: e.key, 
-                modifiers: getModifiers(e)
-            });
+            sendMsg({ type: 'keydown', key: e.key, modifiers: getModifiers(e) });
         }
     }, { passive: false });
 
@@ -190,20 +225,14 @@ function initApp(token) {
             if (e.ctrlKey || e.metaKey || e.altKey || preventDefaultKeys.includes(e.key)) {
                 e.preventDefault();
             }
-            sendMsg({ 
-                type: 'keyup', 
-                key: e.key,
-                modifiers: getModifiers(e)
-            });
+            sendMsg({ type: 'keyup', key: e.key, modifiers: getModifiers(e) });
         }
     }, { passive: false });
 
-    // Handle Copy/Paste (Basic)
     window.addEventListener('paste', (e) => {
         if (document.activeElement === canvas) {
             const text = e.clipboardData.getData('text');
             if (text) {
-                // Send as direct typing to avoid complex key combo mapping
                 sendMsg({ type: 'type', text: text });
             }
         }

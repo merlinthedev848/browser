@@ -1,26 +1,25 @@
 const express = require('express');
 const { chromium } = require('playwright');
+const { PlaywrightBlocker } = require('@ghostery/adblocker-playwright');
+const fetch = require('cross-fetch');
 const WebSocket = require('ws');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const url = require('url');
+const fs = require('fs');
 
 const app = express();
 const port = process.env.PORT || 3000;
-const PASSWORD = process.env.PASSWORD || 'password123'; // Default password
+const PASSWORD = process.env.PASSWORD || 'password123';
 
-// Store active session tokens
 const validTokens = new Set();
-
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Authentication Endpoint
 app.post('/api/login', (req, res) => {
     const { password } = req.body;
     if (password === PASSWORD) {
-        // Generate a random token
         const token = crypto.randomBytes(32).toString('hex');
         validTokens.add(token);
         res.json({ success: true, token });
@@ -32,7 +31,6 @@ app.post('/api/login', (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ noServer: true });
 
-// Handle WebSocket upgrade manually to check authentication
 server.on('upgrade', (request, socket, head) => {
     const parsedUrl = url.parse(request.url, true);
     const token = parsedUrl.query.token;
@@ -42,17 +40,138 @@ server.on('upgrade', (request, socket, head) => {
         socket.destroy();
         return;
     }
-
     wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
     });
 });
 
-let browser, page, client;
+// Browser State
+let context = null;
+let adblocker = null;
+let activeTabId = null;
+let tabCounter = 0;
+
+// Map of tabId -> { page, client, title, url }
+const tabs = new Map(); 
+
+function broadcast(msgObj) {
+    const msg = JSON.stringify(msgObj);
+    wss.clients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(msg);
+        }
+    });
+}
+
+function broadcastTabState() {
+    const tabList = Array.from(tabs.entries()).map(([id, t]) => ({
+        id,
+        title: t.title,
+        url: t.url,
+        isActive: id === activeTabId
+    }));
+    broadcast({ type: 'tab_state', tabs: tabList });
+}
+
+async function createTab(targetUrl = 'https://www.google.com') {
+    const tabId = 'tab_' + (++tabCounter);
+    const page = await context.newPage();
+    
+    if (adblocker) {
+        await adblocker.enableBlockingInPage(page);
+    }
+
+    const client = await page.context().newCDPSession(page);
+    await client.send('Page.enable');
+
+    tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl });
+    
+    // Page events
+    page.on('framenavigated', async (frame) => {
+        if (frame === page.mainFrame()) {
+            const t = tabs.get(tabId);
+            if (t) {
+                t.url = frame.url();
+                t.title = await page.title().catch(() => 'Loading...');
+                broadcastTabState();
+                if (tabId === activeTabId) {
+                    broadcast({ type: 'url_changed', url: t.url });
+                }
+            }
+        }
+    });
+
+    client.on('Page.screencastFrame', (frame) => {
+        if (tabId !== activeTabId) return; // Ignore frames from inactive tabs
+        const { data, sessionId } = frame;
+        client.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
+        broadcast({ type: 'frame', data });
+    });
+
+    await page.goto(targetUrl);
+    return tabId;
+}
+
+async function switchTab(tabId) {
+    if (!tabs.has(tabId)) return;
+    
+    // Stop screencast on old tab
+    if (activeTabId && tabs.has(activeTabId)) {
+        tabs.get(activeTabId).client.send('Page.stopScreencast').catch(() => {});
+    }
+
+    activeTabId = tabId;
+    const t = tabs.get(tabId);
+    
+    broadcastTabState();
+    broadcast({ type: 'url_changed', url: t.url });
+
+    // Start screencast on new tab
+    await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }).catch(() => {});
+}
+
+async function closeTab(tabId) {
+    if (!tabs.has(tabId)) return;
+    const t = tabs.get(tabId);
+    await t.page.close().catch(() => {});
+    tabs.delete(tabId);
+    
+    if (activeTabId === tabId) {
+        if (tabs.size > 0) {
+            // switch to the last available tab
+            const lastTabId = Array.from(tabs.keys()).pop();
+            await switchTab(lastTabId);
+        } else {
+            activeTabId = null;
+            broadcastTabState();
+            // Optionally close the browser or open a new blank tab
+            await createTab();
+            const newTabId = Array.from(tabs.keys()).pop();
+            await switchTab(newTabId);
+        }
+    } else {
+        broadcastTabState();
+    }
+}
 
 async function startBrowser() {
-    browser = await chromium.launch({
+    const userDataDir = path.join(__dirname, 'browser_data');
+    if (!fs.existsSync(userDataDir)) {
+        fs.mkdirSync(userDataDir);
+    }
+
+    // Initialize Adblocker
+    console.log('Initializing Adblocker Engine...');
+    adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch).catch(e => {
+        console.error('Failed to load adblocker lists', e);
+        return null;
+    });
+
+    console.log('Launching persistent browser context...');
+    context = await chromium.launchPersistentContext(userDataDir, {
         headless: true,
+        viewport: { width: 1280, height: 720 },
+        deviceScaleFactor: 1,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -62,84 +181,83 @@ async function startBrowser() {
             '--window-size=1280,720'
         ]
     });
-    const context = await browser.newContext({
-        viewport: { width: 1280, height: 720 },
-        deviceScaleFactor: 1
-    });
-    page = await context.newPage();
     
-    // Create CDP Session for screencast
-    client = await page.context().newCDPSession(page);
-    await client.send('Page.enable');
-    
-    // Go to a default page
-    await page.goto('https://www.google.com');
+    // Close any default blank pages launched by persistent context
+    const pages = context.pages();
+    for (const p of pages) {
+        await p.close();
+    }
 
-    // Handle screencast frames
-    client.on('Page.screencastFrame', (frame) => {
-        const { data, sessionId } = frame;
-        // Acknowledge the frame to receive the next one
-        client.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
-        
-        // Broadcast the frame to all connected WebSocket clients
-        wss.clients.forEach(ws => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'frame', data }));
-            }
-        });
-    });
-
-    console.log('Browser started successfully.');
+    console.log('Browser context ready.');
 }
 
 wss.on('connection', async (ws) => {
     console.log('Client connected securely');
     
-    if (!page) {
+    if (!context) {
         await startBrowser();
     }
     
-    // Start screencast for this client (or ensure it's running)
-    await client.send('Page.startScreencast', {
-        format: 'jpeg',
-        quality: 80,
-        everyNthFrame: 1
-    });
+    if (tabs.size === 0) {
+        const initialTabId = await createTab();
+        await switchTab(initialTabId);
+    } else {
+        // Just send current state to new client
+        broadcastTabState();
+        if (activeTabId) {
+            const t = tabs.get(activeTabId);
+            ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
+            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }).catch(() => {});
+        }
+    }
 
     ws.on('message', async (message) => {
         try {
             const msg = JSON.parse(message);
-            if (!page) return;
+            
+            // Tab Management Commands
+            if (msg.type === 'new_tab') {
+                const newTabId = await createTab(msg.url || 'https://www.google.com');
+                await switchTab(newTabId);
+                return;
+            }
+            if (msg.type === 'switch_tab') {
+                await switchTab(msg.tabId);
+                return;
+            }
+            if (msg.type === 'close_tab') {
+                await closeTab(msg.tabId);
+                return;
+            }
+
+            // Input commands routed to active tab
+            if (!activeTabId || !tabs.has(activeTabId)) return;
+            const activePage = tabs.get(activeTabId).page;
 
             switch (msg.type) {
                 case 'mousemove':
-                    await page.mouse.move(msg.x, msg.y);
+                    await activePage.mouse.move(msg.x, msg.y);
                     break;
                 case 'mousedown':
-                    await page.mouse.down({ button: msg.button });
+                    await activePage.mouse.down({ button: msg.button });
                     break;
                 case 'mouseup':
-                    await page.mouse.up({ button: msg.button });
+                    await activePage.mouse.up({ button: msg.button });
                     break;
                 case 'keydown':
-                    // Map special modifiers if passed
                     if (msg.modifiers) {
-                        for (const mod of msg.modifiers) {
-                            await page.keyboard.down(mod);
-                        }
+                        for (const mod of msg.modifiers) await activePage.keyboard.down(mod);
                     }
-                    await page.keyboard.down(msg.key);
+                    await activePage.keyboard.down(msg.key);
                     break;
                 case 'keyup':
-                    await page.keyboard.up(msg.key);
+                    await activePage.keyboard.up(msg.key);
                     if (msg.modifiers) {
-                        for (const mod of msg.modifiers) {
-                            await page.keyboard.up(mod);
-                        }
+                        for (const mod of msg.modifiers) await activePage.keyboard.up(mod);
                     }
                     break;
                 case 'wheel':
-                    await page.mouse.wheel(msg.deltaX, msg.deltaY);
+                    await activePage.mouse.wheel(msg.deltaX, msg.deltaY);
                     break;
                 case 'goto':
                     if (msg.url) {
@@ -147,12 +265,11 @@ wss.on('connection', async (ws) => {
                         if (!finalUrl.startsWith('http://') && !finalUrl.startsWith('https://')) {
                             finalUrl = 'http://' + finalUrl;
                         }
-                        await page.goto(finalUrl);
+                        await activePage.goto(finalUrl);
                     }
                     break;
                 case 'type':
-                    // Direct typing for characters that might not map 1:1 with down/up
-                    await page.keyboard.type(msg.text);
+                    await activePage.keyboard.type(msg.text);
                     break;
             }
         } catch (err) {
