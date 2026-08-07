@@ -252,10 +252,15 @@ async function startBrowser() {
 
         // Adblocker — cached to disk so restarts are instant
         console.log('[*] Loading adblocker engine...');
-        const cacheDir = path.join(userDataDir, '.adblocker_cache');
-        fs.mkdirSync(cacheDir, { recursive: true });
-        adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch, { path: cacheDir })
-            .catch(e => { console.warn('[!] Adblocker failed to load:', e.message); return null; });
+        const cachePath = path.join(userDataDir, 'adblocker.bin');
+        adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch, {
+            path: cachePath,
+            read: async (p) => fs.promises.readFile(p),
+            write: async (p, content) => fs.promises.writeFile(p, content)
+        }).catch(e => {
+            console.warn('[!] Adblocker failed to load:', e.message);
+            return null;
+        });
 
         console.log('[*] Launching Chromium...');
         context = await chromium.launchPersistentContext(userDataDir, {
