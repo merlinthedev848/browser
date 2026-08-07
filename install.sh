@@ -46,7 +46,17 @@ if [ -n "$EXISTING_PASSWORD" ]; then
 else
     echo "Enter a secure password for your Virtual Browser"
     echo "(Leave blank to use the default: 'password123'):"
-    read -r USER_PASSWORD </dev/tty || true
+    
+    # Check if stdin is a tty (e.g. run via ./install.sh)
+    if [ -t 0 ]; then
+        read -s -r USER_PASSWORD # Use -s to hide password input for security
+        echo ""
+    else
+        # Piped script (e.g. curl ... | bash), read from controlling tty
+        read -s -r USER_PASSWORD </dev/tty 2>/dev/null || USER_PASSWORD=""
+        echo ""
+    fi
+
     if [ -z "$USER_PASSWORD" ]; then
         USER_PASSWORD="password123"
         echo "[!] Using default password: password123"
