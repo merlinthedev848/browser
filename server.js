@@ -382,9 +382,13 @@ wss.on('connection', async (ws) => {
                     p.mouse.move(msg.x, msg.y).catch(() => {});
                     break;
                 case 'mousedown':
+                    console.log(`[ws] Click down at (${msg.x}, ${msg.y}) button: ${msg.button}`);
+                    p.mouse.move(msg.x, msg.y).catch(() => {});
                     p.mouse.down({ button: msg.button || 'left' }).catch(() => {});
                     break;
                 case 'mouseup':
+                    console.log(`[ws] Click up at (${msg.x}, ${msg.y}) button: ${msg.button}`);
+                    p.mouse.move(msg.x, msg.y).catch(() => {});
                     p.mouse.up({ button: msg.button || 'left' }).catch(() => {});
                     break;
 
@@ -414,6 +418,7 @@ wss.on('connection', async (ws) => {
                 case 'goto': {
                     if (!msg.url) break;
                     let target = msg.url.trim();
+                    console.log(`[ws] URL request: "${target}"`);
                     if (!/^https?:\/\//i.test(target)) {
                         const looksLikeIp = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(target);
                         const looksLikeDomain = looksLikeIp
@@ -430,6 +435,7 @@ wss.on('connection', async (ws) => {
                             target = 'https://www.google.com/search?q=' + encodeURIComponent(target);
                         }
                     }
+                    console.log(`[ws] Final resolved navigation target: "${target}"`);
                     p.goto(target).catch(e => console.warn(`[nav] ${e.message}`));
                     break;
                 }

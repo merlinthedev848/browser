@@ -124,18 +124,24 @@ function connectWS(token) {
 
     ws.onmessage = (event) => {
         if (event.data instanceof Blob) {
-            // Fast native binary rendering — completely bypasses base64 decode and fetch() security blocks
-            createImageBitmap(event.data, { resizeQuality: 'high' })
-                .then(bitmap => {
-                    if (!canvas.classList.contains('ready')) {
-                        hideOverlay();
-                        canvas.classList.add('ready');
-                    }
-                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                    bitmap.close();
-                    sendMsg({ type: 'frame_ack' });
-                })
-                .catch(() => sendMsg({ type: 'frame_ack' }));
+            // Highly-compatible native binary loading using Object URLs.
+            // Bypasses createImageBitmap compatibility bugs in browsers like Safari.
+            const url = URL.createObjectURL(event.data);
+            const img = new Image();
+            img.onload = () => {
+                if (!canvas.classList.contains('ready')) {
+                    hideOverlay();
+                    canvas.classList.add('ready');
+                }
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                URL.revokeObjectURL(url); // Immediately free memory
+                sendMsg({ type: 'frame_ack' });
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                sendMsg({ type: 'frame_ack' });
+            };
+            img.src = url;
             return;
         }
 
@@ -283,10 +289,14 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mousedown', (e) => {
     e.preventDefault();
     canvas.focus();
-    sendMsg({ type: 'mousedown', button: mapButton(e) });
+    const c = getMappedCoords(e);
+    sendMsg({ type: 'mousedown', x: c.x, y: c.y, button: mapButton(e) });
 });
 
-canvas.addEventListener('mouseup',    (e) => sendMsg({ type: 'mouseup',  button: mapButton(e) }));
+canvas.addEventListener('mouseup', (e) => {
+    const c = getMappedCoords(e);
+    sendMsg({ type: 'mouseup', x: c.x, y: c.y, button: mapButton(e) });
+});
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 canvas.addEventListener('wheel', (e) => {
