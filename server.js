@@ -424,6 +424,8 @@ wss.on('connection', async (ws) => {
                     if (!msg.url) break;
                     let target = msg.url.trim();
                     console.log(`[ws] URL request: "${target}"`);
+                    
+                    let isAutoprepended = false;
                     if (!/^https?:\/\//i.test(target)) {
                         const looksLikeIp = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(target);
                         const looksLikeDomain = looksLikeIp
@@ -436,12 +438,22 @@ wss.on('connection', async (ws) => {
                                 || target.toLowerCase().startsWith('localhost') 
                                 || target.startsWith('127.0.0.1');
                             target = (useHttp ? 'http://' : 'https://') + target;
+                            isAutoprepended = !useHttp;
                         } else {
                             target = 'https://www.google.com/search?q=' + encodeURIComponent(target);
                         }
                     }
                     console.log(`[ws] Final resolved navigation target: "${target}"`);
-                    p.goto(target).catch(e => console.warn(`[nav] ${e.message}`));
+                    
+                    p.goto(target).catch(async (e) => {
+                        console.warn(`[nav] ${e.message}`);
+                        // If HTTPS fails and we auto-prepended it, fall back to HTTP
+                        if (isAutoprepended && target.startsWith('https://')) {
+                            const fallbackUrl = target.replace('https://', 'http://');
+                            console.log(`[ws] HTTPS failed, trying HTTP fallback: "${fallbackUrl}"`);
+                            await p.goto(fallbackUrl).catch(err => console.warn(`[nav fallback] ${err.message}`));
+                        }
+                    });
                     break;
                 }
 

@@ -135,24 +135,23 @@ function connectWS(token) {
         }
 
         if (isBinary && blob) {
-            // Highly-compatible native binary loading using Object URLs.
-            // Bypasses createImageBitmap compatibility bugs in browsers like Safari.
-            const url = URL.createObjectURL(blob);
-            const img = new Image();
-            img.onload = () => {
-                if (!canvas.classList.contains('ready')) {
-                    hideOverlay();
-                    canvas.classList.add('ready');
-                }
-                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                URL.revokeObjectURL(url); // Immediately free memory
-                sendMsg({ type: 'frame_ack' });
-            };
-            img.onerror = () => {
-                URL.revokeObjectURL(url);
-                sendMsg({ type: 'frame_ack' });
-            };
-            img.src = url;
+            if (typeof createImageBitmap === 'function') {
+                createImageBitmap(blob)
+                    .then(bitmap => {
+                        if (!canvas.classList.contains('ready')) {
+                            hideOverlay();
+                            canvas.classList.add('ready');
+                        }
+                        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                        bitmap.close();
+                        sendMsg({ type: 'frame_ack' });
+                    })
+                    .catch(() => {
+                        renderWithObjectURL(blob);
+                    });
+            } else {
+                renderWithObjectURL(blob);
+            }
             return;
         }
 
@@ -173,8 +172,26 @@ function connectWS(token) {
             case 'cursor':
                 canvas.style.cursor = msg.cursor || 'default';
                 break;
-        }
     };
+}
+
+function renderWithObjectURL(blob) {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+        if (!canvas.classList.contains('ready')) {
+            hideOverlay();
+            canvas.classList.add('ready');
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url); // Immediately free memory
+        sendMsg({ type: 'frame_ack' });
+    };
+    img.onerror = () => {
+        URL.revokeObjectURL(url);
+        sendMsg({ type: 'frame_ack' });
+    };
+    img.src = url;
 }
 
 // ---------- Overlay ----------
