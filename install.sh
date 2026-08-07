@@ -34,12 +34,23 @@ mkdir -p browser_data
 
 # 4. Ask for password
 echo ""
-echo "Enter a secure password for your Virtual Browser"
-echo "(Leave blank to use the default: 'password123'):"
-read -r USER_PASSWORD </dev/tty || true
-if [ -z "$USER_PASSWORD" ]; then
-    USER_PASSWORD="password123"
-    echo "[!] Using default password: password123"
+# Detect existing password from running container
+EXISTING_PASSWORD=""
+if sudo docker ps -a --format '{{.Names}}' | grep -q "^vbrowser$"; then
+    EXISTING_PASSWORD=$(sudo docker inspect --format='{{range .Config.Env}}{{if eq (slice . 0 9) "PASSWORD="}}{{slice . 9}}{{end}}{{end}}' vbrowser 2>/dev/null || true)
+fi
+
+if [ -n "$EXISTING_PASSWORD" ]; then
+    USER_PASSWORD="$EXISTING_PASSWORD"
+    echo "[*] Reusing existing secure password from running container."
+else
+    echo "Enter a secure password for your Virtual Browser"
+    echo "(Leave blank to use the default: 'password123'):"
+    read -r USER_PASSWORD </dev/tty || true
+    if [ -z "$USER_PASSWORD" ]; then
+        USER_PASSWORD="password123"
+        echo "[!] Using default password: password123"
+    fi
 fi
 
 # 5. Build Docker image
