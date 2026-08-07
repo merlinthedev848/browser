@@ -240,12 +240,14 @@ async function startBrowser() {
 
         // FIX: Remove Chromium's singleton lock if left from a crash
         // Without this, Chromium refuses to launch after a container restart
+        // Note: SingletonLock is a symlink on Linux and fs.existsSync returns false for broken symlinks.
+        // We must attempt to unlink directly.
         for (const lockFile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
             const lockPath = path.join(userDataDir, lockFile);
-            if (fs.existsSync(lockPath)) {
+            try {
                 fs.unlinkSync(lockPath);
                 console.log(`[*] Removed stale lock: ${lockFile}`);
-            }
+            } catch (_) {}
         }
 
         // Adblocker — cached to disk so restarts are instant
