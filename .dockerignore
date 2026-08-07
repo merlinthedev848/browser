@@ -1,0 +1,9 @@
+node_modules
+browser_data
+.git
+.gitattributes
+.gitignore
+Dockerfile
+install.sh
+README.md
+*.log
