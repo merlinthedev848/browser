@@ -168,7 +168,7 @@ async function switchTab(tabId) {
         ws.lastFrameData = null;
     });
 
-    await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 60, everyNthFrame: 1 }).catch(() => {});
+    await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }).catch(() => {});
 }
 
 async function closeTab(tabId) {
@@ -215,15 +215,19 @@ async function startBrowser() {
     console.log('Launching persistent browser context...');
     context = await chromium.launchPersistentContext(userDataDir, {
         headless: true,
-        viewport: { width: 1280, height: 720 },
+        viewport: { width: 1920, height: 1080 },
         deviceScaleFactor: 1,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
             '--disable-gpu',
-            '--window-size=1280,720'
+            '--disable-software-rasterizer',
+            '--disable-accelerated-2d-canvas',
+            '--window-size=1920,1080',
+            '--force-device-scale-factor=1',
+            '--font-render-hinting=none',
+            '--disable-font-subpixel-positioning'
         ]
     });
 
@@ -298,7 +302,7 @@ wss.on('connection', async (ws) => {
             const t = tabs.get(activeTabId);
             ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
             // Start screencast for this new client
-            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 60, everyNthFrame: 1 }).catch(() => {});
+            await t.client.send('Page.startScreencast', { format: 'jpeg', quality: 80, everyNthFrame: 1 }).catch(() => {});
         }
     }
 

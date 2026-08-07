@@ -8,7 +8,11 @@ const appContainer = document.getElementById('app-container');
 
 // --- App Elements ---
 const canvas = document.getElementById('screencast');
-const ctx = canvas.getContext('2d');
+// alpha:false skips alpha compositing — measurably faster canvas draw
+const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+// Enable high-quality bilinear downscaling for crisp text
+ctx.imageSmoothingEnabled = true;
+ctx.imageSmoothingQuality = 'high';
 const urlInput = document.getElementById('url-input');
 const goBtn = document.getElementById('go-btn');
 const statusDot = document.querySelector('.status-dot');
@@ -123,20 +127,21 @@ function initApp(token) {
             const msg = JSON.parse(event.data);
 
             if (msg.type === 'frame') {
-                // Use createImageBitmap for hardware-accelerated decode (much faster than new Image)
-                const blob = new Blob([Uint8Array.from(atob(msg.data), c => c.charCodeAt(0))], { type: 'image/jpeg' });
-                createImageBitmap(blob).then(bitmap => {
-                    if (!canvas.classList.contains('ready')) {
-                        hideOverlay();
-                        canvas.classList.add('ready');
-                    }
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                    bitmap.close();
-                    sendMsg({ type: 'frame_ack' });
-                }).catch(() => {
-                    sendMsg({ type: 'frame_ack' });
-                });
+                // Fast base64 decode using fetch API — avoids slow atob() loop
+                fetch('data:image/jpeg;base64,' + msg.data)
+                    .then(r => r.blob())
+                    .then(blob => createImageBitmap(blob, { resizeQuality: 'high' }))
+                    .then(bitmap => {
+                        if (!canvas.classList.contains('ready')) {
+                            hideOverlay();
+                            canvas.classList.add('ready');
+                        }
+                        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                        bitmap.close();
+                        sendMsg({ type: 'frame_ack' });
+                    }).catch(() => {
+                        sendMsg({ type: 'frame_ack' });
+                    });
 
             } else if (msg.type === 'url_changed') {
                 // Only update if user isn't currently typing in the bar
@@ -216,14 +221,16 @@ function initApp(token) {
         }
     }
 
-    // --- Coordinate Mapping ---
+    // --- Coordinate Mapping (browser renders at 1920x1080) ---
+    const REMOTE_W = 1920;
+    const REMOTE_H = 1080;
     function getMappedCoords(e) {
         const rect = canvas.getBoundingClientRect();
-        const scaleX = 1280 / rect.width;
-        const scaleY = 720 / rect.height;
+        const scaleX = REMOTE_W / rect.width;
+        const scaleY = REMOTE_H / rect.height;
         return {
-            x: (e.clientX - rect.left) * scaleX,
-            y: (e.clientY - rect.top) * scaleY
+            x: Math.round((e.clientX - rect.left) * scaleX),
+            y: Math.round((e.clientY - rect.top) * scaleY)
         };
     }
 
