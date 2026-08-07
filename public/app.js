@@ -100,6 +100,7 @@ function connectWS(token) {
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}/?token=${token}`);
+    ws.binaryType = 'blob';
 
     ws.onopen = () => {
         statusDot.classList.replace('disconnected', 'connected');
@@ -121,29 +122,27 @@ function connectWS(token) {
         // onclose will fire right after — let that handle UI
     };
 
-    ws.onmessage = ({ data: raw }) => {
+    ws.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+            // Fast native binary rendering — completely bypasses base64 decode and fetch() security blocks
+            createImageBitmap(event.data, { resizeQuality: 'high' })
+                .then(bitmap => {
+                    if (!canvas.classList.contains('ready')) {
+                        hideOverlay();
+                        canvas.classList.add('ready');
+                    }
+                    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+                    bitmap.close();
+                    sendMsg({ type: 'frame_ack' });
+                })
+                .catch(() => sendMsg({ type: 'frame_ack' }));
+            return;
+        }
+
         let msg;
-        try { msg = JSON.parse(raw); } catch { return; }
+        try { msg = JSON.parse(event.data); } catch { return; }
 
         switch (msg.type) {
-            case 'frame':
-                // Use the browser's native C++ base64 decoder via fetch('data:...')
-                // Dramatically faster than the JS atob() character loop
-                fetch('data:image/jpeg;base64,' + msg.data)
-                    .then(r => r.blob())
-                    .then(blob => createImageBitmap(blob, { resizeQuality: 'high' }))
-                    .then(bitmap => {
-                        if (!canvas.classList.contains('ready')) {
-                            hideOverlay();
-                            canvas.classList.add('ready');
-                        }
-                        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-                        bitmap.close();
-                        sendMsg({ type: 'frame_ack' });
-                    })
-                    .catch(() => sendMsg({ type: 'frame_ack' }));
-                break;
-
             case 'url_changed':
                 if (document.activeElement !== urlInput) {
                     urlInput.value = msg.url;

@@ -98,7 +98,9 @@ function sendFrameToClient(ws, data) {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (!ws.frameInFlight) {
         ws.frameInFlight = true;
-        ws.send(JSON.stringify({ type: 'frame', data }));
+        // Convert base64 to binary buffer for 33% smaller transfer size and native browser decoding
+        const buffer = Buffer.from(data, 'base64');
+        ws.send(buffer);
     } else {
         ws.lastFrameData = data; // Always keep the most recent frame
     }
