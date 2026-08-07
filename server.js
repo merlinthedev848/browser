@@ -23,21 +23,78 @@ process.on('unhandledRejection', (reason) => {
 
 // ---------- HTTP / Express ----------
 const validTokens = new Map(); // token -> { createdAt }
-app.use(express.json());
+const loginAttempts = new Map(); // ip -> { count, lockUntil }
+
+// Basic IP rate limiter helper
+function getClientIp(req) {
+    return req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+}
+
+app.use(express.json({ limit: '1kb' })); // Restrict JSON payload size to prevent DoS
+
+// Inject security headers to prevent clickjacking, MIME sniffing, and cross-site scripting
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com;");
+    next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.post('/api/login', (req, res) => {
     const { password } = req.body || {};
-    if (password === PASSWORD) {
+    const ip = getClientIp(req);
+
+    // 1. Validate input structure
+    if (typeof password !== 'string' || password.length > 128) {
+        return res.status(400).json({ success: false, error: 'Invalid payload structure' });
+    }
+
+    // 2. Check for active lockout
+    const attempt = loginAttempts.get(ip) || { count: 0, lockUntil: 0 };
+    if (Date.now() < attempt.lockUntil) {
+        const waitSec = Math.ceil((attempt.lockUntil - Date.now()) / 1000);
+        return res.status(429).json({ 
+            success: false, 
+            error: `Too many failed attempts. Locked out for ${waitSec} seconds.` 
+        });
+    }
+
+    // 3. Timing-safe comparison (hashing strings to equal length to prevent character-guessing timing attacks)
+    const inputHash = crypto.createHash('sha256').update(password).digest();
+    const expectedHash = crypto.createHash('sha256').update(PASSWORD).digest();
+    const isMatched = crypto.timingSafeEqual(inputHash, expectedHash);
+
+    if (isMatched) {
+        // Reset rate limiter on success
+        loginAttempts.delete(ip);
+
         const token = crypto.randomBytes(32).toString('hex');
         validTokens.set(token, { createdAt: Date.now() });
-        // Clean up tokens older than 24 hours
+
+        // Clean up stale tokens
         for (const [t, v] of validTokens) {
             if (Date.now() - v.createdAt > 86_400_000) validTokens.delete(t);
         }
         res.json({ success: true, token });
     } else {
-        res.status(401).json({ success: false, error: 'Invalid password' });
+        // Increment attempts and apply exponential backoff lockout
+        attempt.count++;
+        if (attempt.count >= 5) {
+            // Lockout starts at 1 minute and doubles with each subsequent failure
+            const lockoutDuration = 60_000 * Math.pow(2, attempt.count - 5);
+            attempt.lockUntil = Date.now() + lockoutDuration;
+        }
+        loginAttempts.set(ip, attempt);
+
+        res.status(401).json({ 
+            success: false, 
+            error: attempt.count >= 5 
+                ? 'Invalid password. You are now temporarily locked out.' 
+                : 'Invalid password' 
+        });
     }
 });
 
