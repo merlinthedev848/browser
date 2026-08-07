@@ -435,12 +435,21 @@ wss.on('connection', async (ws) => {
                     if (!msg.url) break;
                     let target = msg.url.trim();
                     if (!/^https?:\/\//i.test(target)) {
-                        // Detect bare domain vs search query
-                        const looksLikeDomain = /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/.*)?$/.test(target)
-                            || target.startsWith('localhost');
-                        target = looksLikeDomain
-                            ? 'https://' + target
-                            : 'https://www.google.com/search?q=' + encodeURIComponent(target);
+                        const looksLikeIp = /^(\d{1,3}\.){3}\d{1,3}(:\d+)?(\/.*)?$/.test(target);
+                        const looksLikeDomain = looksLikeIp
+                            || /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(:\d+)?(\/.*)?$/.test(target)
+                            || target.toLowerCase().startsWith('localhost')
+                            || target.startsWith('127.0.0.1');
+
+                        if (looksLikeDomain) {
+                            // Local IPs and localhosts default to http://, public domains default to https://
+                            const useHttp = looksLikeIp 
+                                || target.toLowerCase().startsWith('localhost') 
+                                || target.startsWith('127.0.0.1');
+                            target = (useHttp ? 'http://' : 'https://') + target;
+                        } else {
+                            target = 'https://www.google.com/search?q=' + encodeURIComponent(target);
+                        }
                     }
                     // Non-blocking navigation
                     p.goto(target).catch(e => console.warn(`[nav] ${e.message}`));
