@@ -25,7 +25,6 @@ process.on('unhandledRejection', (reason) => {
 const validTokens = new Map(); // token -> { createdAt }
 const loginAttempts = new Map(); // ip -> { count, lockUntil }
 
-// Basic IP rate limiter helper
 function getClientIp(req) {
     return req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
 }
@@ -47,12 +46,10 @@ app.post('/api/login', (req, res) => {
     const { password } = req.body || {};
     const ip = getClientIp(req);
 
-    // 1. Validate input structure
     if (typeof password !== 'string' || password.length > 128) {
         return res.status(400).json({ success: false, error: 'Invalid payload structure' });
     }
 
-    // 2. Check for active lockout
     const attempt = loginAttempts.get(ip) || { count: 0, lockUntil: 0 };
     if (Date.now() < attempt.lockUntil) {
         const waitSec = Math.ceil((attempt.lockUntil - Date.now()) / 1000);
@@ -62,28 +59,22 @@ app.post('/api/login', (req, res) => {
         });
     }
 
-    // 3. Timing-safe comparison (hashing strings to equal length to prevent character-guessing timing attacks)
     const inputHash = crypto.createHash('sha256').update(password).digest();
     const expectedHash = crypto.createHash('sha256').update(PASSWORD).digest();
     const isMatched = crypto.timingSafeEqual(inputHash, expectedHash);
 
     if (isMatched) {
-        // Reset rate limiter on success
         loginAttempts.delete(ip);
-
         const token = crypto.randomBytes(32).toString('hex');
         validTokens.set(token, { createdAt: Date.now() });
 
-        // Clean up stale tokens
         for (const [t, v] of validTokens) {
             if (Date.now() - v.createdAt > 86_400_000) validTokens.delete(t);
         }
         res.json({ success: true, token });
     } else {
-        // Increment attempts and apply exponential backoff lockout
         attempt.count++;
         if (attempt.count >= 5) {
-            // Lockout starts at 1 minute and doubles with each subsequent failure
             const lockoutDuration = 60_000 * Math.pow(2, attempt.count - 5);
             attempt.lockUntil = Date.now() + lockoutDuration;
         }
@@ -116,59 +107,37 @@ server.on('upgrade', (request, socket, head) => {
     });
 });
 
-// ---------- Browser State ----------
-let context = null;
+// ---------- Global Browser Instance & Adblocker ----------
+let browser = null;
 let adblocker = null;
-let activeTabId = null;
-let tabCounter = 0;
 let browserStarting = false;
 let browserReady = false;
-
-/** @type {Map<string, {page, client, title: string, url: string, favicon: string}>} */
-const tabs = new Map();
-
-// ---------- Helpers ----------
-function connectedClients() {
-    return [...wss.clients].filter(ws => ws.readyState === WebSocket.OPEN);
-}
-
-function broadcast(msgObj) {
-    const msg = JSON.stringify(msgObj);
-    for (const ws of connectedClients()) {
-        ws.send(msg);
-    }
-}
-
-function broadcastTabState() {
-    const tabList = Array.from(tabs.entries()).map(([id, t]) => ({
-        id,
-        title: t.title,
-        url: t.url,
-        favicon: t.favicon,
-        isActive: id === activeTabId
-    }));
-    broadcast({ type: 'tab_state', tabs: tabList });
-}
 
 /** Send a frame to one client with explicit flow control */
 function sendFrameToClient(ws, data) {
     if (ws.readyState !== WebSocket.OPEN) return;
     if (!ws.frameInFlight) {
         ws.frameInFlight = true;
-        // Convert base64 to binary buffer for 33% smaller transfer size and native browser decoding
         const buffer = Buffer.from(data, 'base64');
         ws.send(buffer);
     } else {
-        ws.lastFrameData = data; // Always keep the most recent frame
+        ws.lastFrameData = data;
     }
 }
 
-/** Check if any WS clients are watching this tab */
-function hasWatchers() {
-    return connectedClients().length > 0;
+function sendTabState(ws) {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const tabList = Array.from(ws.tabs.entries()).map(([id, t]) => ({
+        id,
+        title: t.title,
+        url: t.url,
+        favicon: t.favicon,
+        isActive: id === ws.activeTabId
+    }));
+    ws.send(JSON.stringify({ type: 'tab_state', tabs: tabList }));
 }
 
-// ---------- Screencast control ----------
+// ---------- Screencast Control ----------
 async function startScreencast(client) {
     await client.send('Page.startScreencast', {
         format: 'jpeg',
@@ -183,10 +152,10 @@ async function stopScreencast(client) {
     await client.send('Page.stopScreencast').catch(() => {});
 }
 
-// ---------- Tab Management ----------
-async function createTab(targetUrl = 'https://www.google.com') {
-    const tabId = 'tab_' + (++tabCounter);
-    const page = await context.newPage();
+// ---------- Connection-scoped Tab Management ----------
+async function createTab(ws, targetUrl = 'https://www.google.com') {
+    const tabId = 'tab_' + (++ws.tabCounter);
+    const page = await ws.context.newPage();
 
     if (adblocker) {
         await adblocker.enableBlockingInPage(page).catch(() => {});
@@ -195,17 +164,15 @@ async function createTab(targetUrl = 'https://www.google.com') {
     const client = await page.context().newCDPSession(page);
     await client.send('Page.enable');
 
-    tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl, favicon: '' });
+    ws.tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl, favicon: '' });
 
-    // Update metadata on navigation
     page.on('framenavigated', (frame) => {
         if (frame !== page.mainFrame()) return;
-        const t = tabs.get(tabId);
+        const t = ws.tabs.get(tabId);
         if (!t || page.isClosed()) return;
 
         t.url = frame.url();
 
-        // Non-blocking: fetch title then favicon, then broadcast
         page.title()
             .then(title => { if (t) t.title = title || 'New Tab'; })
             .catch(() => {})
@@ -216,75 +183,61 @@ async function createTab(targetUrl = 'https://www.google.com') {
             .then(fav => { if (t) t.favicon = fav || ''; })
             .catch(() => {})
             .finally(() => {
-                broadcastTabState();
-                if (tabId === activeTabId) {
-                    broadcast({ type: 'url_changed', url: t.url });
+                sendTabState(ws);
+                if (tabId === ws.activeTabId) {
+                    ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
                 }
             });
     });
 
-    // Screencast frame relay
     client.on('Page.screencastFrame', ({ data, sessionId }) => {
-        // Immediately ack to keep Playwright's internal frame buffer clear
         client.send('Page.screencastFrameAck', { sessionId }).catch(() => {});
-
-        if (tabId !== activeTabId) return;
-        if (!hasWatchers()) return;
-
-        for (const ws of connectedClients()) {
-            sendFrameToClient(ws, data);
-        }
+        if (tabId !== ws.activeTabId) return;
+        sendFrameToClient(ws, data);
     });
 
-    // Navigate without blocking the caller
     page.goto(targetUrl).catch(e => console.warn(`[Tab ${tabId}] nav error: ${e.message}`));
     return tabId;
 }
 
-async function switchTab(tabId) {
-    if (!tabs.has(tabId)) return;
+async function switchTab(ws, tabId) {
+    if (!ws.tabs.has(tabId)) return;
 
-    // Stop screencast on old tab
-    if (activeTabId && tabs.has(activeTabId) && activeTabId !== tabId) {
-        await stopScreencast(tabs.get(activeTabId).client);
+    if (ws.activeTabId && ws.tabs.has(ws.activeTabId) && ws.activeTabId !== tabId) {
+        await stopScreencast(ws.tabs.get(ws.activeTabId).client);
     }
 
-    activeTabId = tabId;
-    const t = tabs.get(tabId);
+    ws.activeTabId = tabId;
+    const t = ws.tabs.get(tabId);
 
-    // Reset all client flow-control state before new screencast starts
-    for (const ws of connectedClients()) {
-        ws.frameInFlight = false;
-        ws.lastFrameData = null;
-    }
+    ws.frameInFlight = false;
+    ws.lastFrameData = null;
 
-    broadcastTabState();
-    broadcast({ type: 'url_changed', url: t.url });
+    sendTabState(ws);
+    ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
 
-    if (hasWatchers()) {
-        await startScreencast(t.client);
-    }
+    await startScreencast(t.client);
 }
 
-async function closeTab(tabId) {
-    if (!tabs.has(tabId)) return;
-    const t = tabs.get(tabId);
+async function closeTab(ws, tabId) {
+    if (!ws.tabs.has(tabId)) return;
+    const t = ws.tabs.get(tabId);
 
     await stopScreencast(t.client);
     await t.page.close().catch(() => {});
-    tabs.delete(tabId);
+    ws.tabs.delete(tabId);
 
-    if (activeTabId === tabId) {
-        if (tabs.size > 0) {
-            await switchTab(Array.from(tabs.keys()).pop());
+    if (ws.activeTabId === tabId) {
+        if (ws.tabs.size > 0) {
+            await switchTab(ws, Array.from(ws.tabs.keys()).pop());
         } else {
-            activeTabId = null;
-            broadcastTabState();
-            const newId = await createTab();
-            await switchTab(newId);
+            ws.activeTabId = null;
+            sendTabState(ws);
+            const newId = await createTab(ws);
+            await switchTab(ws, newId);
         }
     } else {
-        broadcastTabState();
+        sendTabState(ws);
     }
 }
 
@@ -294,24 +247,11 @@ async function startBrowser() {
     browserStarting = true;
 
     try {
-        const userDataDir = path.join(__dirname, 'browser_data');
-        fs.mkdirSync(userDataDir, { recursive: true });
-
-        // FIX: Remove Chromium's singleton lock if left from a crash
-        // Without this, Chromium refuses to launch after a container restart
-        // Note: SingletonLock is a symlink on Linux and fs.existsSync returns false for broken symlinks.
-        // We must attempt to unlink directly.
-        for (const lockFile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
-            const lockPath = path.join(userDataDir, lockFile);
-            try {
-                fs.unlinkSync(lockPath);
-                console.log(`[*] Removed stale lock: ${lockFile}`);
-            } catch (_) {}
-        }
-
-        // Adblocker — cached to disk so restarts are instant
         console.log('[*] Loading adblocker engine...');
-        const cachePath = path.join(userDataDir, 'adblocker.bin');
+        const cacheDir = path.join(__dirname, 'adblocker_cache');
+        fs.mkdirSync(cacheDir, { recursive: true });
+        const cachePath = path.join(cacheDir, 'adblocker.bin');
+
         adblocker = await PlaywrightBlocker.fromPrebuiltAdsAndTracking(fetch, {
             path: cachePath,
             read: async (p) => fs.promises.readFile(p),
@@ -322,74 +262,44 @@ async function startBrowser() {
         });
 
         console.log('[*] Launching Chromium...');
-        context = await chromium.launchPersistentContext(userDataDir, {
+        browser = await chromium.launch({
             headless: true,
-            viewport: { width: 1920, height: 1080 },
-            deviceScaleFactor: 1,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--disable-accelerated-2d-canvas',
-                '--window-size=1920,1080',
-                '--force-device-scale-factor=1',
-                // Improve text rendering in headless software mode
                 '--enable-font-antialiasing',
                 '--disable-lcd-text'
             ]
         });
 
-        // Cursor style sync — injected into every new page
-        await context.exposeBinding('__reportCursor', (source, cursor) => {
-            if (source.page.isClosed()) return;
-            const tab = Array.from(tabs.values()).find(t => t.page === source.page);
-            if (tab && activeTabId && tabs.get(activeTabId) === tab) {
-                broadcast({ type: 'cursor', cursor });
-            }
-        });
-
-        await context.addInitScript(() => {
-            document.addEventListener('mouseover', (e) => {
-                try {
-                    window.__reportCursor(window.getComputedStyle(e.target).cursor);
-                } catch (_) {}
-            }, { passive: true, capture: true });
-        });
-
-        // Close any stale pages opened by the persistent context
-        for (const p of context.pages()) {
-            await p.close().catch(() => {});
-        }
-
         browserReady = true;
         browserStarting = false;
         console.log('[*] Browser ready.');
     } catch (err) {
-        browserStarting = false; // FIX: Always reset so retries are possible
+        browserStarting = false;
         throw err;
     }
 }
 
-// ---------- Pre-warm at startup ----------
-(async () => {
-    try {
-        await startBrowser();
-        const tabId = await createTab();
-        await switchTab(tabId);
-        console.log('[*] Server fully ready and waiting for connections.');
-    } catch (err) {
-        console.error('[!] Pre-warm failed, will retry on first connection:', err.message);
-    }
-})();
+// Pre-start browser at server boot
+startBrowser().catch(err => {
+    console.error('[!] Pre-warm failed, will retry on first connection:', err.message);
+});
 
 // ---------- WebSocket Connection Handler ----------
 wss.on('connection', async (ws) => {
     console.log('[+] Client connected');
+
+    // Setup connection-scoped state
     ws.frameInFlight = false;
     ws.lastFrameData = null;
+    ws.tabs = new Map();
+    ws.activeTabId = null;
+    ws.tabCounter = 0;
 
-    // Wait up to 60s for the browser to be ready (handles slow cold starts)
     let waited = 0;
     while (browserStarting && waited < 60_000) {
         await new Promise(r => setTimeout(r, 250));
@@ -407,25 +317,44 @@ wss.on('connection', async (ws) => {
         }
     }
 
-    if (tabs.size === 0) {
-        const tabId = await createTab();
-        await switchTab(tabId);
-    } else {
-        // Reconnecting client — resend full current state
-        broadcastTabState();
-        if (activeTabId && tabs.has(activeTabId)) {
-            const t = tabs.get(activeTabId);
-            ws.send(JSON.stringify({ type: 'url_changed', url: t.url }));
-            await startScreencast(t.client);
-        }
+    // Create client-isolated BrowserContext
+    try {
+        ws.context = await browser.newContext({
+            viewport: { width: 1920, height: 1080 },
+            deviceScaleFactor: 1
+        });
+
+        // Set up cursor reporting binding for this client's context
+        await ws.context.exposeBinding('__reportCursor', (source, cursor) => {
+            if (source.page.isClosed()) return;
+            const tab = Array.from(ws.tabs.values()).find(t => t.page === source.page);
+            if (tab && ws.activeTabId && ws.tabs.get(ws.activeTabId) === tab) {
+                ws.send(JSON.stringify({ type: 'cursor', cursor }));
+            }
+        });
+
+        await ws.context.addInitScript(() => {
+            document.addEventListener('mouseover', (e) => {
+                try {
+                    window.__reportCursor(window.getComputedStyle(e.target).cursor);
+                } catch (_) {}
+            }, { passive: true, capture: true });
+        });
+    } catch (err) {
+        console.error('[!] Failed to create browser context:', err.message);
+        ws.close(1011, 'Failed to initialize session');
+        return;
     }
+
+    // Initialize first tab for this connection
+    const tabId = await createTab(ws);
+    await switchTab(ws, tabId);
 
     ws.on('message', async (raw) => {
         let msg;
         try { msg = JSON.parse(raw); } catch { return; }
 
         try {
-            // --- Flow control ---
             if (msg.type === 'frame_ack') {
                 ws.frameInFlight = false;
                 if (ws.lastFrameData) {
@@ -436,18 +365,16 @@ wss.on('connection', async (ws) => {
                 return;
             }
 
-            // --- Tab management ---
             if (msg.type === 'new_tab') {
-                const id = await createTab(msg.url || 'https://www.google.com');
-                await switchTab(id);
+                const id = await createTab(ws, msg.url || 'https://www.google.com');
+                await switchTab(ws, id);
                 return;
             }
-            if (msg.type === 'switch_tab') { await switchTab(msg.tabId); return; }
-            if (msg.type === 'close_tab')  { await closeTab(msg.tabId);  return; }
+            if (msg.type === 'switch_tab') { await switchTab(ws, msg.tabId); return; }
+            if (msg.type === 'close_tab')  { await closeTab(ws, msg.tabId);  return; }
 
-            // --- Input routing ---
-            if (!activeTabId || !tabs.has(activeTabId)) return;
-            const p = tabs.get(activeTabId).page;
+            if (!ws.activeTabId || !ws.tabs.has(ws.activeTabId)) return;
+            const p = ws.tabs.get(ws.activeTabId).page;
             if (p.isClosed()) return;
 
             switch (msg.type) {
@@ -462,8 +389,6 @@ wss.on('connection', async (ws) => {
                     break;
 
                 case 'keydown': {
-                    const modKeys = new Set(['Control', 'Shift', 'Alt', 'Meta']);
-                    // Press modifiers (skip if the key itself is a modifier to avoid double-press)
                     if (msg.modifiers?.length) {
                         for (const mod of msg.modifiers) {
                             if (mod !== msg.key) await p.keyboard.down(mod).catch(() => {});
@@ -473,10 +398,8 @@ wss.on('connection', async (ws) => {
                     break;
                 }
                 case 'keyup': {
-                    // Release key first, then release modifiers
                     await p.keyboard.up(msg.key).catch(() => {});
                     if (msg.modifiers?.length) {
-                        const modKeys = new Set(['Control', 'Shift', 'Alt', 'Meta']);
                         for (const mod of msg.modifiers) {
                             if (mod !== msg.key) await p.keyboard.up(mod).catch(() => {});
                         }
@@ -499,7 +422,6 @@ wss.on('connection', async (ws) => {
                             || target.startsWith('127.0.0.1');
 
                         if (looksLikeDomain) {
-                            // Local IPs and localhosts default to http://, public domains default to https://
                             const useHttp = looksLikeIp 
                                 || target.toLowerCase().startsWith('localhost') 
                                 || target.startsWith('127.0.0.1');
@@ -508,7 +430,6 @@ wss.on('connection', async (ws) => {
                             target = 'https://www.google.com/search?q=' + encodeURIComponent(target);
                         }
                     }
-                    // Non-blocking navigation
                     p.goto(target).catch(e => console.warn(`[nav] ${e.message}`));
                     break;
                 }
@@ -522,11 +443,11 @@ wss.on('connection', async (ws) => {
         }
     });
 
-    ws.on('close', () => {
+    ws.on('close', async () => {
         console.log('[-] Client disconnected');
-        // If no more clients, stop wasting CPU on screencast
-        if (connectedClients().length === 0 && activeTabId && tabs.has(activeTabId)) {
-            stopScreencast(tabs.get(activeTabId).client);
+        // Close browser context associated with this client to clear memory, history, cookies, and localstorage
+        if (ws.context) {
+            await ws.context.close().catch(() => {});
         }
     });
 
