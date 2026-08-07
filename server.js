@@ -153,7 +153,7 @@ async function stopScreencast(client) {
 }
 
 // ---------- Connection-scoped Tab Management ----------
-async function createTab(ws, targetUrl = 'https://www.google.com') {
+async function createTab(ws) {
     const tabId = 'tab_' + (++ws.tabCounter);
     const page = await ws.context.newPage();
 
@@ -164,7 +164,7 @@ async function createTab(ws, targetUrl = 'https://www.google.com') {
     const client = await page.context().newCDPSession(page);
     await client.send('Page.enable');
 
-    ws.tabs.set(tabId, { page, client, title: 'New Tab', url: targetUrl, favicon: '' });
+    ws.tabs.set(tabId, { page, client, title: 'New Tab', url: 'about:blank', favicon: '' });
 
     page.on('framenavigated', (frame) => {
         if (frame !== page.mainFrame()) return;
@@ -196,7 +196,6 @@ async function createTab(ws, targetUrl = 'https://www.google.com') {
         sendFrameToClient(ws, data);
     });
 
-    page.goto(targetUrl).catch(e => console.warn(`[Tab ${tabId}] nav error: ${e.message}`));
     return tabId;
 }
 
@@ -235,6 +234,8 @@ async function closeTab(ws, tabId) {
             sendTabState(ws);
             const newId = await createTab(ws);
             await switchTab(ws, newId);
+            const p = ws.tabs.get(newId).page;
+            p.goto('https://www.google.com').catch(e => console.warn(`[nav] ${e.message}`));
         }
     } else {
         sendTabState(ws);
@@ -349,6 +350,8 @@ wss.on('connection', async (ws) => {
     // Initialize first tab for this connection
     const tabId = await createTab(ws);
     await switchTab(ws, tabId);
+    const initialPage = ws.tabs.get(tabId).page;
+    initialPage.goto('https://www.google.com').catch(e => console.warn(`[nav] ${e.message}`));
 
     ws.on('message', async (raw) => {
         let msg;
@@ -366,8 +369,10 @@ wss.on('connection', async (ws) => {
             }
 
             if (msg.type === 'new_tab') {
-                const id = await createTab(ws, msg.url || 'https://www.google.com');
+                const id = await createTab(ws);
                 await switchTab(ws, id);
+                const p = ws.tabs.get(id).page;
+                p.goto(msg.url || 'https://www.google.com').catch(e => console.warn(`[nav] ${e.message}`));
                 return;
             }
             if (msg.type === 'switch_tab') { await switchTab(ws, msg.tabId); return; }
