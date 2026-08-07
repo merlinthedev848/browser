@@ -123,10 +123,21 @@ function connectWS(token) {
     };
 
     ws.onmessage = (event) => {
+        let isBinary = false;
+        let blob = null;
+
         if (event.data instanceof Blob) {
+            isBinary = true;
+            blob = event.data;
+        } else if (event.data instanceof ArrayBuffer) {
+            isBinary = true;
+            blob = new Blob([event.data], { type: 'image/jpeg' });
+        }
+
+        if (isBinary && blob) {
             // Highly-compatible native binary loading using Object URLs.
             // Bypasses createImageBitmap compatibility bugs in browsers like Safari.
-            const url = URL.createObjectURL(event.data);
+            const url = URL.createObjectURL(blob);
             const img = new Image();
             img.onload = () => {
                 if (!canvas.classList.contains('ready')) {
